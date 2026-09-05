@@ -25,7 +25,7 @@ class Config:
     image_key: str = "vllm"
     max_model_len: int = 8192
     max_num_seqs: int = 64
-    gpu_mem_util: float = 0.80
+    gpu_mem_util: float = 0.55
     quantization: str | None = None
     text_only: bool = True            # both targets are VLMs; we benchmark text
     spec_overrides: dict = field(default_factory=dict)

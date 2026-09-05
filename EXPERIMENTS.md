@@ -260,6 +260,53 @@ cut** — trimming k to {2,4,7} per method roughly halves it.
 3. **Power.** Worth logging per-token energy if `tegrastats` exposes it on GB10 — "joules per
    token" is arguably the most honest metric for a desktop box.
 
+## 8b. Measured gotchas (found during setup, before any benchmarking)
+
+These are real findings from getting the engines running, and belong in the post.
+
+1. **`--gpu-memory-utilization` means something different on unified memory.**
+   On a discrete GPU it is a fraction of dedicated VRAM. On GB10 it is a fraction of
+   *all 119 GB shared with the OS*. Setting `0.80` for a 31 GB model made vLLM claim
+   ~95 GB and allocate a **63 GiB KV cache** (450k tokens) for a run needing a few
+   hundred MB — which drove the box into swap, stalled server startup for ~9 minutes,
+   and got the supervising shell script OOM-killed twice. `0.55` is ample for these
+   targets; the 128K-context stage is the only one that needs it raised.
+2. **vLLM 0.28 removed `--disable-log-requests`** (now `--enable-log-requests`, default
+   off). Anything scripted against 0.25.1 — including the deployment currently on this
+   box — breaks on upgrade.
+3. **`vllm serve --help` needs `--gpus all`.** The parser is built from a live
+   `VllmConfig`, so introspecting flags without a GPU raises rather than printing help.
+4. **The Qwen3.8-27B-FP8 repo ships 66 per-layer shards**, not the 11 the Hub file
+   listing suggests. Verify against `model.safetensors.index.json`, not file count.
+
+### First measurement — and why the first attempt was wrong
+
+Qwen3.8-27B-FP8, batch 1, greedy, 128 tokens:
+
+| condition | tok/s | % of 8.84 tok/s ceiling |
+|---|---|---|
+| `gpu-memory-utilization 0.80`, swapping | 4.09 | 46% |
+| **`0.55`, no swap** | **8.00** | **90.5%** |
+
+The first number was memory-pressure artefact, not signal — worth recording because it is
+exactly the trap gotcha #1 sets, and it very nearly became a published figure.
+
+The clean number is the interesting one. **Batch-1 decode reaches 90% of the pure
+bandwidth limit.** For contrast, the H200 in the DFlash 2 card hits 68.9 tok/s against its
+own `4800 / 30.87 = 155.5` ceiling — only **44%**. The Spark sits far closer to its
+roofline, because at 273 GB/s the weight read so dominates each step that fixed overheads
+(kernel launch, sampling, Python) vanish into it, while at 4.8 TB/s those same overheads
+are a large fraction of step time.
+
+Two consequences, both of which sharpen the post's argument:
+
+1. The roofline model in §1 is *more* predictive on this box than on a datacenter card.
+2. There is essentially no headroom left in kernel optimisation — 90% of the ceiling is
+   already reached. Speculative decoding is the only remaining lever, which is precisely
+   the claim §1.3 makes.
+
+At DFlash 2's reported 3.43×, this baseline projects to roughly **27 tok/s**.
+
 ## 9. Scope
 
 Single node only. This box has a second DGX Spark attached and a multinode/Ray setup on
