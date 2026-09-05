@@ -1,0 +1,17 @@
+# never commit credentials
+.env
+*.token
+hf_token*
+**/token
+
+# model weights live in /home/spark/models, never in the repo
+models/
+*.safetensors
+*.gguf
+*.bin
+
+# raw benchmark output can be large; keep curated results/ only
+results/raw/
+*.log
+__pycache__/
+.venv/
