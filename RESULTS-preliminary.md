@@ -31,6 +31,15 @@ Hardware: one DGX Spark (GB10), 273 GB/s, vLLM 0.28.0, `gpu-memory-utilization 0
 | DFlash k=7 | 7.12 | 1.36 | 1.02× | — |
 | DFlash k=15 (block-matched) | 7.08 | 1.30 | 1.02× | — |
 
+### gemma-4-31B-it-FP8-block — 32 GB, ceiling **8.53 tok/s**
+
+| config | tok/s | τ | speedup |
+|---|---|---|---|
+| baseline | 5.99 | — | 1.00× (70% of ceiling) |
+| MTP k=4 | 25.61 | 3.84 | 4.28× |
+| EAGLE3 k=3 | 20.80 | 3.04 | 3.47× |
+| DFlash k=7 | 11.14 | 2.26 | 1.86× |
+
 ---
 
 ## Three findings worth chasing
@@ -54,28 +63,47 @@ disappear into it; at 4.8 TB/s they are a large fraction of step time.
 Consequences: the §1 roofline model is *more* predictive here than on a datacenter card,
 and there is essentially nothing left to win from kernel tuning.
 
-### 3. Does NVFP4 break hidden-state speculative heads? — **open**
+### 3. Target quantization changes acceptance — but not the way I first guessed
 
-| target | head | consumes | τ | outcome |
+Same gemma-4-31B weights, same heads, same prompt and k; only the target's quantization
+differs (`nvidia/…-NVFP4` vs `RedHatAI/…-FP8-block`):
+
+| head | consumes | NVFP4 τ | FP8 τ | Δ |
 |---|---|---|---|---|
-| Qwen FP8 | DFlash 2 | hidden states | 5.00 | works |
-| gemma NVFP4 | MTP assistant | **tokens** | 4.38 | works |
-| gemma NVFP4 | EAGLE3 (3 layers) | hidden states | 2.65 | degraded, 66% of max |
-| gemma NVFP4 | DFlash (6 layers) | hidden states | 1.30 | **broken, 8% of max** |
+| DFlash (6 aux layers) | hidden states | 1.36 | 2.26 | **+66%** |
+| EAGLE3 (3 aux layers) | hidden states | 2.65 | 3.04 | +15% |
+| MTP assistant | **tokens** | 4.38 | 3.84 | **−12%** |
 
-The head is not misconfigured: it declares 60 target layers, hidden 5376, vocab 262144,
-all of which match the NVFP4 target exactly, and block-matching k to its `block_size: 16`
-changed nothing (τ 1.36 → 1.30).
+Throughput, for reference (NVFP4 baseline 6.95, FP8 baseline 5.99 tok/s):
 
-The pattern that fits is that **NVFP4 perturbs the hidden states feature-level drafters
-read, while token-level drafters are immune** — with damage scaling in how many layers
-the head taps. If it holds, it is a practical warning: quantize your target to NVFP4 on a
-Spark and your EAGLE3/DFlash head may quietly stop paying for itself while still
-appearing to run.
+| head | NVFP4 | FP8 |
+|---|---|---|
+| MTP k=4 | 28.72 (4.13×) | 25.61 (4.28×) |
+| EAGLE3 k=3 | 19.27 (2.77×) | 20.80 (3.47×) |
+| DFlash k=7 | 7.12 (1.02×) | 11.14 (1.86×) |
 
-**Test in flight:** re-run gemma DFlash against `RedHatAI/gemma-4-31B-it-FP8-block`
-(same weights, gentler quantization). If τ recovers, the hypothesis holds. If it stays
-~1.3, the cause is elsewhere and this section gets rewritten.
+**The original hypothesis was that NVFP4 corrupts the hidden states feature-level heads
+read, leaving token-level heads untouched. The MTP control refutes the clean version:**
+MTP did not hold steady, it moved 12% the *other* way.
+
+What can honestly be said right now:
+
+- **DFlash's +66% is large enough to be real.** A drafter tapping six target layers is
+  materially damaged by NVFP4, and the head is not misconfigured — it declares 60 target
+  layers, hidden 5376, vocab 262144, all matching, and block-matching k to its
+  `block_size: 16` changed nothing (τ 1.36 → 1.30).
+- **EAGLE3's +15% and MTP's −12% are not yet distinguishable from noise.** One 128-token
+  generation at k=4 is roughly 29 draft steps — far too small a sample to resolve effects
+  that size.
+- A plausible story for the MTP direction is that a more aggressively quantized target
+  produces *more predictable* output, which flatters a token-level drafter even as it
+  degrades a feature-level one. That is speculation, and it is not tested.
+
+**Resolution:** Stage 1 runs 200 prompts per config, which settles all three effects with
+real statistics. Until then this stays an open question, not a finding. It is worth the
+extra runs either way — "your NVFP4 quantization may be silently costing you half your
+speculative speedup" is exactly the kind of practical warning this post should carry, but
+only if it survives a proper sample.
 
 ---
 
